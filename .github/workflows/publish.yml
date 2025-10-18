@@ -30,8 +30,15 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Publish
+      - name: Publish to npm
         if: steps.check.outputs.exists == 'false'
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Publish to GitHub Packages
+      - name: Publish to GitHub Packages
+        if: steps.check.outputs.exists == 'false'
+        run: npm publish --registry=https://npm.pkg.github.com --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
