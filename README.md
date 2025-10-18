@@ -5,7 +5,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-16+-green.svg)](https://nodejs.org/)
 [![Excalidraw](https://img.shields.io/badge/Excalidraw-0.17.6-purple.svg)](https://github.com/excalidraw/excalidraw)
-[![Views](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2FMahdiMirzadeh%2Fexcalocal&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=views&edge_flat=false)](https://hits.seeyoufarm.com)
 
 </div>
 
@@ -17,12 +16,6 @@ A self-hosted Excalidraw server that runs locally with a beautiful handwritten f
 
 - [✨ Features](#-features)
 - [📦 Installation](#-installation)
-  - [Step 1: Install Prerequisites](#step-1-install-prerequisites)
-  - [Step 2: Create Directory Structure](#step-2-create-directory-structure)
-  - [Step 3: Install JavaScript Dependencies](#step-3-install-javascript-dependencies)
-  - [Step 4: Download Custom Font](#step-4-download-custom-font)
-  - [Step 5: Download and Install excalocal](#step-5-download-and-install-excalocal)
-  - [Step 6: Add to PATH](#step-6-add-to-path)
 - [🚀 Usage](#-usage)
 - [📁 Directory Structure](#-directory-structure)
 - [🛠️ Configuration](#%EF%B8%8F-configuration)
@@ -43,120 +36,17 @@ A self-hosted Excalidraw server that runs locally with a beautiful handwritten f
 
 ## 📦 Installation
 
-### Step 1: Install Prerequisites
-
-First, install Node.js and a package manager on your system:
-
-#### Node.js Installation by Distribution
-
-**Debian/Ubuntu-based systems:**
-```bash
-sudo apt update
-sudo apt install nodejs npm
-```
-
-**RHEL/CentOS/Fedora:**
-```bash
-# Fedora
-sudo dnf install nodejs npm
-# RHEL/CentOS (with EPEL)
-sudo yum install epel-release
-sudo yum install nodejs npm
-```
-
-**Arch Linux-based systems:**
-```bash
-sudo pacman -S nodejs npm
-```
-
-**OpenSUSE:**
-```bash
-sudo zypper install nodejs npm
-```
-
-**Alpine Linux:**
-```bash
-sudo apk add nodejs npm
-```
-
-**Gentoo:**
-```bash
-sudo emerge nodejs
-```
-
-#### Alternative Package Managers
-
-After installing Node.js, you can optionally install alternative package managers:
-
-**Yarn:**
-```bash
-npm install -g yarn
-```
-
-**pnpm:**
-```bash
-npm install -g pnpm
-```
-
-**Bun:**
-```bash
-curl -fsSL https://bun.sh/install | bash
-source ~/.bashrc
-```
-
-#### Verify Installation
-```bash
-node -v
-npm -v
-# If using alternatives:
-# yarn -v
-# pnpm -v  
-# bun -v
-```
-
-### Step 2: Create Directory Structure
-
-Create the necessary directories for excalocal:
+Install excalocal globally using npm:
 
 ```bash
-mkdir -p ~/.local/share/excalocal/fonts ~/.local/bin
+npm install -g excalocal
 ```
 
-### Step 3: Install JavaScript Dependencies
-
-Choose your preferred package manager:
-```bash
-cd ~/.local/share/excalocal
-npm install react react-dom @excalidraw/excalidraw@0.17.6
-# yarn install react react-dom @excalidraw/excalidraw@0.17.6
-# pnpm install react react-dom @excalidraw/excalidraw@0.17.6
-# bun  install react react-dom @excalidraw/excalidraw@0.17.6
-```
-
-### Step 4: Download Custom Font
-
-```bash
-curl -L -o ~/.local/share/excalocal/fonts/Excalifont.woff2 \
-  https://raw.githubusercontent.com/MahdiMirzadeh/excalocal/refs/heads/master/Excalifont-Regular.woff2
-```
-
-### Step 5: Download and Install excalocal
-
-```bash
-curl -L -o ~/.local/bin/excalocal \
-  https://raw.githubusercontent.com/MahdiMirzadeh/excalocal/refs/heads/master/excalocal
-
-chmod +x ~/.local/bin/excalocal
-```
-
-### Step 6: Add to PATH
-
-Ensure `~/.local/bin` is in your PATH:
-
-```bash
-echo $PATH | grep -qo "$HOME/.local/bin" || \
-  ( echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc; source ~/.bashrc )
-```
+That's it! The package will automatically:
+- Install all required dependencies
+- Download the custom Excalifont
+- Set up the necessary directory structure
+- Make the `excalocal` command available globally
 
 ### ✅ Verify Installation
 
@@ -228,26 +118,6 @@ excalocal -c
 - **Network**: `http://YOUR_IP:3030` (accessible from other devices on your network)
 - **Custom Port**: `http://localhost:YOUR_PORT`
 
-## 📁 Directory Structure
-
-After installation, your files will be organized as:
-
-```
-~/.local/
-├── bin/
-│   └── excalocal                    # Main executable
-└── share/excalocal/
-    ├── fonts/
-    │   └── Excalifont.woff2        # Custom handwritten font
-    ├── package.json                # Dependencies manifest
-    └── node_modules/               # JavaScript libraries
-        ├── react/
-        ├── react-dom/
-        └── @excalidraw/excalidraw/
-```
-
-*This keeps your `~/.local/bin` directory clean while storing all dependencies in the standard `~/.local/share` location.*
-
 ## 🛠️ Configuration
 
 ### Environment Variables
@@ -258,9 +128,9 @@ After installation, your files will be organized as:
 ### Instance State
 
 Instance information is stored in:
-```
-~/.local/state/excalidraw/instances.json
-```
+- **Linux**: `~/.local/state/excalocal/instances.json`
+- **macOS**: `~/Library/Application Support/excalocal/instances.json`
+- **Windows**: `%APPDATA%\excalocal\instances.json`
 
 ## 🐛 Troubleshooting
 
@@ -272,24 +142,19 @@ Instance information is stored in:
 excalocal  # Will use 3031 if 3030 is busy
 ```
 
-**Font not loading:**
-```bash
-# Check if font file exists
-ls ~/.local/share/excalocal/fonts/Excalifont.woff2
-
-# Re-download if missing
-curl -L -o ~/.local/share/excalocal/fonts/Excalifont.woff2 \
-  https://raw.githubusercontent.com/MahdiMirzadeh/excalocal/refs/heads/master/Excalifont-Regular.woff2
-```
-
 **Command not found:**
 ```bash
-# Check if ~/.local/bin is in PATH
-echo $PATH | grep ".local/bin"
+# Make sure excalocal is installed globally
+npm list -g excalocal
 
-# If not, add it:
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+# If not installed, install it:
+npm install -g excalocal
+```
+
+**Permission issues on Linux/macOS:**
+```bash
+# If you get permission errors, you may need to use sudo
+sudo npm install -g excalocal
 ```
 
 ## 🙏 Acknowledgments
@@ -307,5 +172,5 @@ MIT License - see LICENSE file for details.
 ## 🚀 Uninstall
 
 ```bash
-rm -rf ~/.local/share/excalocal ~/.local/bin/excalocal
+npm uninstall -g excalocal
 ```
