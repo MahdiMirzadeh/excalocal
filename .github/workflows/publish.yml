@@ -10,6 +10,7 @@ jobs:
     permissions:
       contents: read
       id-token: write  # needed for npm provenance
+      packages: write  # needed for GitHub Packages
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,9 +37,20 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Publish to GitHub Packages
+      # Publish to GitHub Packages (requires scoped name)
+      - name: Modify package.json for GitHub Packages
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          jq '.name = "@mahdimirzadeh/excalocal"' package.json > package.tmp.json
+          mv package.tmp.json package.json
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com
+      
       - name: Publish to GitHub Packages
         if: steps.check.outputs.exists == 'false'
-        run: npm publish --registry=https://npm.pkg.github.com --access public
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
