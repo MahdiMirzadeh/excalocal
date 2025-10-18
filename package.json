@@ -1,0 +1,54 @@
+{
+  "name": "excalocal",
+  "version": "1.1.3",
+  "description": "Local Excalidraw server with custom handwritten font and advanced instance management",
+  "main": "excalocal",
+  "bin": {
+    "excalocal": "./excalocal"
+  },
+  "scripts": {
+    "test": "node excalocal --version",
+    "postinstall": "node postinstall.js"
+  },
+  "keywords": [
+    "excalidraw",
+    "whiteboard",
+    "drawing",
+    "local-server",
+    "sketching",
+    "diagram",
+    "handwritten-font",
+    "excalifont",
+    "self-hosted"
+  ],
+  "author": "Mahdi Mirzadeh <mahdi@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MahdiMirzadeh/excalocal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MahdiMirzadeh/excalocal/issues"
+  },
+  "homepage": "https://github.com/MahdiMirzadeh/excalocal#readme",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "@excalidraw/excalidraw": "0.17.6"
+  },
+  "files": [
+    "excalocal",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "preferGlobal": true,
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ]
+}
