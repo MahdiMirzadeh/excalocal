@@ -1,0 +1,988 @@
+#!/usr/bin/env node
+'use strict'
+
+/**
+ * excalocal - Local Excalidraw server with custom handwritten font
+ * 
+ * A self-hosted Excalidraw server that runs locally with custom font support,
+ * instance management, and offline-first architecture.
+ * 
+ * @author Mahdi Mirzadeh
+ * @license MIT
+ * @see https://github.com/MahdiMirzadeh/excalocal
+ */
+
+const http = require('http')
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { spawn } = require('child_process')
+
+const VERSION = '1.1.4'
+const PROGNAME = path.basename(process.argv[1])
+
+// ============================================================================
+// DEPENDENCY RESOLUTION
+// ============================================================================
+
+/**
+ * Finds the installation paths of required npm dependencies.
+ * Uses require.resolve() for npm global installations and falls back
+ * to local node_modules for development environments.
+ * 
+ * @returns {Object} Paths to React, ReactDOM, and Excalidraw packages
+ */
+const findDependencyPaths = () => {
+  try {
+    return {
+      react: path.dirname(require.resolve('react/package.json')),
+      reactDom: path.dirname(require.resolve('react-dom/package.json')),
+      excalidraw: path.dirname(require.resolve('@excalidraw/excalidraw/package.json'))
+    }
+  } catch (err) {
+    // Fallback for development/local testing
+    const fallbackLibsDir = path.join(__dirname, 'node_modules')
+    return {
+      react: path.join(fallbackLibsDir, 'react'),
+      reactDom: path.join(fallbackLibsDir, 'react-dom'),
+      excalidraw: path.join(fallbackLibsDir, '@excalidraw', 'excalidraw')
+    }
+  }
+}
+
+const DEP_PATHS = findDependencyPaths()
+
+/**
+ * Locates the fonts directory containing custom fonts.
+ * Checks the package directory first (for npm installations),
+ * then falls back to the legacy user directory path.
+ * 
+ * @returns {string} Path to the fonts directory
+ */
+const findFontsDir = () => {
+  // Check if fonts exist in the package directory (npm installation)
+  const packageFonts = path.join(__dirname, 'fonts')
+  if (fs.existsSync(path.join(packageFonts, 'Excalifont-Regular.woff2'))) {
+    return packageFonts
+  }
+  
+  // Fallback to user directory (legacy/manual installation)
+  return path.join(os.homedir(), '.local', 'share', 'excalocal', 'fonts')
+}
+
+const FONTS_DIR = findFontsDir()
+
+// Exit codes
+const EXIT_SUCCESS = 0
+const EXIT_FAILURE = 1
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+const log = {
+  error: (msg) => console.error(`${PROGNAME}: ERROR: ${msg}`),
+  warn: (msg) => console.warn(`${PROGNAME}: WARN: ${msg}`),
+  info: (msg) => console.log(`${PROGNAME}: ${msg}`),
+  debug: (msg, verbose) => verbose && console.log(`${PROGNAME}: DEBUG: ${msg}`)
+}
+
+const die = (msg, code = EXIT_FAILURE) => {
+  log.error(msg)
+  process.exit(code)
+}
+
+const warn = (msg) => {
+  log.warn(msg)
+}
+
+/**
+ * Validates that all required dependencies and assets exist.
+ * Exits with an error message if any dependencies are missing.
+ * 
+ * @throws {Error} Exits process if dependencies are missing
+ */
+const validateDependencies = () => {
+  const requiredPaths = [
+    { path: FONTS_DIR, name: 'Fonts directory' },
+    { path: DEP_PATHS.react, name: 'React library' },
+    { path: DEP_PATHS.reactDom, name: 'React-DOM library' },
+    { path: DEP_PATHS.excalidraw, name: 'Excalidraw library' },
+    { path: path.join(FONTS_DIR, 'Excalifont-Regular.woff2'), name: 'Excalifont font' }
+  ]
+
+  const missing = requiredPaths.filter(({ path }) => !fs.existsSync(path))
+  
+  if (missing.length > 0) {
+    log.error('Missing required dependencies:')
+    missing.forEach(({ path, name }) => {
+      console.error(`  - ${name}: ${path}`)
+    })
+    console.error('\nThis usually means excalocal was not installed properly.')
+    console.error('Please install excalocal using npm:')
+    console.error('  npm install -g excalocal')
+    console.error('\nOr check: https://github.com/MahdiMirzadeh/excalocal#installation')
+    process.exit(EXIT_FAILURE)
+  }
+}
+
+/**
+ * Validates user-provided configuration values.
+ * Ensures port numbers and instance names meet requirements.
+ * 
+ * @param {Object} config - Configuration object to validate
+ * @returns {Object} Validated configuration object
+ * @throws {Error} Exits process if validation fails
+ */
+const validateConfig = (config) => {
+  // Validate port range
+  if (config.port < 1024 || config.port > 65535) {
+    die(`Invalid port ${config.port}. Must be between 1024-65535`)
+  }
+  
+  // Validate instance name (if provided)
+  if (config.name && !/^[a-zA-Z0-9_-]+$/.test(config.name)) {
+    die(`Invalid instance name '${config.name}'. Use only letters, numbers, hyphens, and underscores`)
+  }
+  
+  return config
+}
+
+/**
+ * Sanitizes file paths to prevent directory traversal attacks.
+ * Removes path traversal attempts and validates for dangerous characters.
+ * 
+ * @param {string} inputPath - User-provided file path
+ * @returns {string} Sanitized file path
+ * @throws {Error} If path contains malicious patterns
+ */
+const sanitizePath = (inputPath) => {
+  // Remove any attempts at directory traversal
+  const normalized = path.normalize(inputPath).replace(/^(\..[/\\])+/, '')
+  
+  // Ensure it doesn't contain null bytes or other dangerous characters
+  if (normalized.includes('\0') || normalized.includes('..')) {
+    throw new Error('Invalid file path detected')
+  }
+  
+  return normalized
+}
+
+// ============================================================================
+// CLI ARGUMENT PARSING
+// ============================================================================
+
+/**
+ * Parses command-line arguments and returns configuration object.
+ * Handles both short and long-form flags, including combined short flags.
+ * 
+ * @returns {Object|undefined} Configuration object or undefined if command was handled
+ */
+const parseArgs = () => {
+  const args = process.argv.slice(2)
+  const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3030
+  const config = { 
+    port: !isNaN(envPort) && envPort > 0 ? envPort : 3030, 
+    host: '127.0.0.1', 
+    background: false, 
+    child: false, 
+    name: null, 
+    verbose: false 
+  }
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    
+    // Handle combined short flags like -bn
+    if (arg.startsWith('-') && !arg.startsWith('--') && arg.length > 2) {
+      const flags = arg.slice(1).split('')
+      
+      // Check for command flags that should not be combined
+      const commandFlags = ['l', 'c', 'o', 'k', 'd', 'h', 'V']
+      const hasCommandFlag = flags.some(f => commandFlags.includes(f))
+      
+      if (hasCommandFlag) {
+        die('command flags (-l, -c, -o, -k, -d, -h, -V) cannot be combined\nTry: ' + PROGNAME + ' -l  or  ' + PROGNAME + ' -b -n work')
+      }
+      
+      let lastFlagIndex = -1
+      
+      for (let j = 0; j < flags.length; j++) {
+        const flag = flags[j]
+        if (flag === 'b') config.background = true
+        else if (flag === 'v') config.verbose = true
+        else if (flag === 'n' || flag === 'p') {
+          // Last flag needs an argument from next args element
+          lastFlagIndex = j
+          break
+        }
+      }
+      
+      // If last flag needs an argument, handle it
+      if (lastFlagIndex >= 0) {
+        const flag = flags[lastFlagIndex]
+        const value = args[++i]
+        if (!value) {
+          die(`Flag -${flag} requires a value`)
+        }
+        if (flag === 'n') config.name = value
+        else if (flag === 'p') {
+          const port = parseInt(value, 10)
+          if (isNaN(port) || port <= 0) {
+            die(`Invalid port number: ${value}`)
+          }
+          config.port = port
+        }
+        else if (flag === 'o') { openInstance(value); return { __handled: true } }
+        else if (flag === 'k') return killInstance(value)
+        else if (flag === 'd') return deleteInstance(value)
+      }
+      continue
+    }
+    
+    if (arg === '-p' || arg === '--port') {
+      const value = args[++i]
+      if (!value) die('--port requires a value')
+      const port = parseInt(value, 10)
+      if (isNaN(port) || port <= 0) die(`Invalid port number: ${value}`)
+      config.port = port
+    }
+    else if (arg === '-n' || arg === '--name') {
+      const value = args[++i]
+      if (!value) die('--name requires a value')
+      config.name = value
+    }
+    else if (arg === '-b' || arg === '--background') config.background = true
+    else if (arg === '-v' || arg === '--verbose') config.verbose = true
+    else if (arg === '--child') config.child = true
+    else if (arg === '-l' || arg === '--list') return listInstances()
+    else if (arg === '-o' || arg === '--open') { openInstance(args[++i]); return { __handled: true } }
+    else if (arg === '-k' || arg === '--kill') return killInstance(args[++i])
+    else if (arg === '-d' || arg === '--delete') return deleteInstance(args[++i])
+    else if (arg === '-c' || arg === '--cleanup') return cleanupInstances()
+    else if (arg === '-h' || arg === '--help') return showHelp()
+    else if (arg === '-V' || arg === '--version') return showVersion()
+    else if (!isNaN(Number(arg))) config.port = Number(arg)
+  }
+  
+  return config
+}
+
+// ============================================================================
+// INSTANCE MANAGEMENT
+// ============================================================================
+
+/**
+ * Gets the platform-appropriate state directory for storing instance data.
+ * - Linux: ~/.local/state/excalocal (XDG Base Directory)
+ * - macOS: ~/Library/Application Support/excalocal
+ * - Windows: %APPDATA%\excalocal
+ * 
+ * Creates the directory if it doesn't exist.
+ * 
+ * @returns {string} Path to the state directory
+ */
+const getStateDir = () => {
+  const platform = os.platform()
+  let stateDir
+  
+  if (platform === 'win32') {
+    // Windows: use APPDATA
+    stateDir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'excalocal')
+  } else if (platform === 'darwin') {
+    // macOS: use ~/Library/Application Support
+    stateDir = path.join(os.homedir(), 'Library', 'Application Support', 'excalocal')
+  } else {
+    // Linux/Unix: use XDG Base Directory specification
+    const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state')
+    stateDir = path.join(stateHome, 'excalocal')
+  }
+  
+  if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true })
+  return stateDir
+}
+
+/**
+ * Gets the path to the instances.json file.
+ * 
+ * @returns {string} Path to instances.json
+ */
+const getInstanceFile = () => path.join(getStateDir(), 'instances.json')
+
+/**
+ * Loads all tracked instances from the instances.json file.
+ * 
+ * @returns {Object} Map of port numbers to instance objects
+ */
+const loadInstances = () => {
+  try {
+    const file = getInstanceFile()
+    if (!fs.existsSync(file)) return {}
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Saves the instances map to the instances.json file.
+ * 
+ * @param {Object} instances - Map of port numbers to instance objects
+ */
+const saveInstances = (instances) => {
+  try {
+    fs.writeFileSync(getInstanceFile(), JSON.stringify(instances, null, 2))
+  } catch (err) {
+    console.warn('Failed to save instances:', err.message)
+  }
+}
+
+/**
+ * Finds an instance by its name.
+ * 
+ * @param {string} name - Instance name to search for
+ * @returns {Object|undefined} Instance object or undefined if not found
+ */
+const findInstanceByName = (name) => {
+  const instances = loadInstances()
+  return Object.values(instances).find(inst => inst.name === name)
+}
+
+/**
+ * Finds an instance by its port number.
+ * 
+ * @param {number} port - Port number to search for
+ * @returns {Object|undefined} Instance object or undefined if not found
+ */
+const findInstanceByPort = (port) => {
+  const instances = loadInstances()
+  return instances[String(port)]
+}
+
+/**
+ * Registers a new instance or updates an existing one.
+ * Prevents duplicate instance names on different ports.
+ * 
+ * @param {number} port - Port number for the instance
+ * @param {string} name - Optional name for the instance
+ * @throws {Error} Exits if instance name already exists on a different port
+ */
+const registerInstance = (port, name) => {
+  const instances = loadInstances()
+  const portStr = String(port)
+  const finalName = name || `instance-${port}`
+  
+  // Check for duplicate name
+  const existing = Object.values(instances).find(inst => inst.name === finalName && inst.port !== port)
+  if (existing) {
+    die('instance name \'' + finalName + '\' already exists on port ' + existing.port)
+  }
+  
+  instances[portStr] = { port, name: finalName, lastUsed: new Date().toISOString(), pid: process.pid }
+  saveInstances(instances)
+}
+
+/**
+ * Deletes an instance from tracking by its port number.
+ * 
+ * @param {number} port - Port number of the instance to delete
+ */
+const deleteInstanceByPort = (port) => {
+  const instances = loadInstances()
+  delete instances[String(port)]
+  saveInstances(instances)
+}
+
+/**
+ * Clears the PID from an instance, marking it as stopped but still tracked.
+ * Updates the lastUsed timestamp.
+ * 
+ * @param {number} port - Port number of the instance
+ */
+const clearInstancePid = (port) => {
+  const instances = loadInstances()
+  const portStr = String(port)
+  if (instances[portStr]) {
+    delete instances[portStr].pid
+    instances[portStr].lastUsed = new Date().toISOString()
+    saveInstances(instances)
+  }
+}
+
+// ============================================================================
+// COMMAND HANDLERS
+// ============================================================================
+
+/**
+ * Opens an existing instance in the browser.
+ * If the instance is not running, starts it first.
+ * 
+ * @param {string} nameOrPort - Instance name or port number
+ * @throws {Error} Exits if instance is not found
+ */
+const openInstance = (nameOrPort) => {
+  if (!nameOrPort) die('missing instance name or port')
+  
+  const instance = isNaN(nameOrPort) ? findInstanceByName(nameOrPort) : findInstanceByPort(Number(nameOrPort))
+  if (!instance) die('instance \'' + nameOrPort + '\' not found')
+  
+  // Check if instance is actually running
+  if (!instance.pid || !isProcessAlive(instance.pid)) {
+    console.log('instance \'' + instance.name + '\' is not running, starting it...')
+    // Start server child directly (single process) on the same port
+    try {
+      const node = process.execPath
+      const args = [__filename, '-p', String(instance.port), '--child']
+      if (instance.name) args.push('--name', instance.name)
+      const child = spawn(node, args, { detached: true, stdio: 'ignore' })
+      child.unref()
+    } catch (err) {
+      warn('failed to start instance: ' + err.message)
+    }
+    // Give it a moment to start
+    setTimeout(() => {
+      const url = 'http://127.0.0.1:' + instance.port + '/'
+      console.log('opening ' + instance.name + ' at ' + url)
+      openBrowser(url)
+      process.exit(EXIT_SUCCESS)
+    }, 1200)
+  } else {
+    const url = 'http://127.0.0.1:' + instance.port + '/'
+    console.log('opening ' + instance.name + ' at ' + url)
+    openBrowser(url)
+    process.exit(EXIT_SUCCESS)
+  }
+}
+
+/**
+ * Kills a running instance by terminating its process.
+ * 
+ * @param {string} nameOrPort - Instance name or port number
+ * @throws {Error} Exits if instance is not found or has no active PID
+ */
+const killInstance = (nameOrPort) => {
+  if (!nameOrPort) die('missing instance name or port')
+  
+  const instance = isNaN(nameOrPort) ? findInstanceByName(nameOrPort) : findInstanceByPort(Number(nameOrPort))
+  if (!instance) die('instance \'' + nameOrPort + '\' not found')
+  if (!instance.pid) die('instance \'' + instance.name + '\' has no active PID')
+  
+  try {
+    process.kill(instance.pid)
+    console.log('killed ' + instance.name + ' (PID ' + instance.pid + ')')
+    clearInstancePid(instance.port)
+  } catch (err) {
+    warn('failed to kill PID ' + instance.pid + ': ' + err.message)
+    warn('clearing PID from tracking')
+    clearInstancePid(instance.port)
+  }
+  process.exit(EXIT_SUCCESS)
+}
+
+/**
+ * Deletes an instance from tracking without killing its process.
+ * 
+ * @param {string} nameOrPort - Instance name or port number
+ * @throws {Error} Exits if instance is not found
+ */
+const deleteInstance = (nameOrPort) => {
+  if (!nameOrPort) die('missing instance name or port')
+  
+  const instance = isNaN(nameOrPort) ? findInstanceByName(nameOrPort) : findInstanceByPort(Number(nameOrPort))
+  if (!instance) {
+    console.error(`Error: Instance '${nameOrPort}' not found`)
+    process.exit(1)
+  }
+  
+  deleteInstanceByPort(instance.port)
+  console.log('Deleted ' + instance.name + ' from tracking')
+  process.exit(0)
+}
+
+/**
+ * Checks if a process is still running.
+ * 
+ * @param {number} pid - Process ID to check
+ * @returns {boolean} True if process is alive, false otherwise
+ */
+const isProcessAlive = (pid) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Cleans up inactive instances from tracking.
+ * Removes instances that have no PID or whose process has died.
+ */
+const cleanupInstances = () => {
+  const instances = loadInstances()
+  let cleaned = 0
+  
+  Object.values(instances).forEach(inst => {
+    // Remove if PID is missing or dead
+    if (!inst.pid || !isProcessAlive(inst.pid)) {
+      deleteInstanceByPort(inst.port)
+      console.log('Removed inactive instance: ' + inst.name + ' (port ' + inst.port + ')')
+      cleaned++
+    }
+  })
+  
+  if (cleaned === 0) {
+    console.log('No inactive instances found')
+  } else {
+    console.log('Cleaned up ' + cleaned + ' inactive instance(s)')
+  }
+  process.exit(0)
+}
+
+/**
+ * Lists all tracked instances with their details.
+ * Shows instance name, port, PID, and last used timestamp.
+ */
+const listInstances = () => {
+  const instances = loadInstances()
+  if (!Object.keys(instances).length) {
+    console.log('No running instances tracked')
+    process.exit(0)
+  }
+  console.log('\nTracked Excalidraw instances:')
+  console.log('---')
+  Object.values(instances).forEach(({ port, name, lastUsed, pid }) => {
+    const date = new Date(lastUsed).toLocaleString()
+    console.log('  ' + name + ' (port ' + port + ', PID ' + pid + ') - last used: ' + date)
+  })
+  console.log()
+  process.exit(0)
+}
+
+/**
+ * Displays help information with usage examples.
+ */
+const showHelp = () => {
+  console.log('\nExcalidraw Local Server v' + VERSION + ' with Excalifont\n\nUsage: excalocal [options] [port]\n\nOptions:\n  -p, --port <number>     Server port (default: 3030)\n  -n, --name <string>     Name for this instance (must be unique)\n  -b, --background        Run as daemon in background\n  -v, --verbose           Show verbose output\n\nCommands:\n  -l, --list              List all tracked instances\n  -o, --open <name|port>  Open instance in browser\n  -k, --kill <name|port>  Kill instance process\n  -d, --delete <name|port> Remove instance from tracking\n  -c, --cleanup           Remove inactive instances\n  -h, --help              Show this help\n  -V, --version           Show version info\n\nExamples:\n  excalocal -n work       # Start instance named \'work\'\n  excalocal -b -n ideas   # Start daemon named \'ideas\'\n  excalocal -l            # List all instances\n  excalocal -o work       # Open \'work\' in browser\n  excalocal -k 3031       # Kill instance on port 3031\n  excalocal -c            # Remove inactive instances\n')
+  process.exit(0)
+}
+
+/**
+ * Gets the version of an installed package.
+ * 
+ * @param {string} name - Package name
+ * @returns {string} Version string or 'unknown'
+ */
+const getPackageVersion = (name) => {
+  try { 
+    let pkgPath
+    if (name === 'react') pkgPath = path.join(DEP_PATHS.react, 'package.json')
+    else if (name === 'react-dom') pkgPath = path.join(DEP_PATHS.reactDom, 'package.json')
+    else if (name === '@excalidraw/excalidraw') pkgPath = path.join(DEP_PATHS.excalidraw, 'package.json')
+    else return 'unknown'
+    
+    return JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version
+  }
+  catch { return 'unknown' }
+}
+
+/**
+ * Displays version information for excalocal and its dependencies.
+ */
+const showVersion = () => {
+  console.log(`Excalidraw Local Server v${VERSION}\nWith Excalifont font override support\n\nDependencies:\n  React: ${getPackageVersion('react')}\n  React-DOM: ${getPackageVersion('react-dom')}\n  Excalidraw: ${getPackageVersion('@excalidraw/excalidraw')}`)
+  process.exit(0)
+}
+
+// ============================================================================
+// CONFIGURATION & SETUP
+// ============================================================================
+
+const config = parseArgs()
+let PORT, HOST, background, child, instanceName, verbose
+if (config && !config.__handled) {
+  validateConfig(config)
+  
+  PORT = config.port
+  HOST = config.host
+  background = config.background
+  child = config.child
+  instanceName = config.name
+  verbose = config.verbose
+  
+  log.debug(`Configuration: port=${PORT}, background=${background}, name=${instanceName}`, verbose)
+}
+
+// Validate all dependencies before proceeding
+if (config && !config.__handled) {
+  log.debug('Validating dependencies...', verbose)
+  validateDependencies()
+}
+
+// ============================================================================
+// HTTP SERVER
+// ============================================================================
+
+// Resolved paths to installed dependencies
+const paths = {
+  react: DEP_PATHS.react,
+  reactDom: DEP_PATHS.reactDom,
+  excalidraw: DEP_PATHS.excalidraw
+}
+
+const assetsDir = path.join(paths.excalidraw, 'dist', 'excalidraw-assets')
+if (!fs.existsSync(assetsDir)) {
+  die(`Excalidraw assets not found: ${assetsDir}`)
+}
+
+/**
+ * Generates the HTML template with React, Excalidraw, and custom font injection.
+ * Includes:
+ * - Custom Excalifont font override via CSS
+ * - React and Excalidraw UMD bundle imports
+ * - LocalStorage-based persistence
+ * - Dark theme by default
+ * 
+ * @returns {string} Complete HTML document as string
+ */
+function htmlTemplate() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Excalidraw Local</title>
+  <link rel="preload" href="/fonts/Excalifont-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <style>
+    /* Override Virgil font with Excalifont */
+    @font-face {
+      font-family: 'Virgil';
+      src: url('/fonts/Excalifont-Regular.woff2') format('woff2');
+      font-weight: normal;
+      font-style: normal;
+      font-display: block;
+    }
+    
+    /* Additional font-face declaration for Excalifont name */
+    @font-face {
+      font-family: 'Excalifont';
+      src: url('/fonts/Excalifont-Regular.woff2') format('woff2');
+      font-weight: normal;
+      font-style: normal;
+      font-display: block;
+    }
+    
+    html, body { background: #000; height: 100%; margin: 0; }
+    #root { height: 100vh; }
+    
+    /* Apply Excalifont to Excalidraw canvas and UI */
+    .excalidraw .layer-ui__wrapper {
+      font-family: 'Excalifont', 'Virgil', cursive !important;
+    }
+    
+    /* Apply Excalifont to canvas text elements */
+    .excalidraw .excalidraw__canvas {
+      font-family: 'Excalifont', 'Virgil', cursive !important;
+    }
+    
+    /* Ensure text elements use the custom font */
+    .excalidraw svg text {
+      font-family: 'Excalifont', 'Virgil', cursive !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>window.EXCALIDRAW_ASSET_PATH = '/';</script>
+  <script src="/vendor/react.production.min.js"></script>
+  <script src="/vendor/react-dom.production.min.js"></script>
+  <script src="/vendor/excalidraw.production.min.js"></script>
+  <script>
+    const { Excalidraw } = window.ExcalidrawLib;
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    
+    // Simplest persistence: save only elements (avoid appState/library/files shape issues)
+    const SAVE_KEY = 'excalidraw-elements:v1'
+
+    const loadElements = () => {
+      try {
+        const saved = localStorage.getItem(SAVE_KEY)
+        const parsed = saved ? JSON.parse(saved) : null
+        return Array.isArray(parsed) ? parsed : null
+      } catch {
+        return null
+      }
+    }
+
+    const saveElements = (elements) => {
+      try {
+        if (Array.isArray(elements)) {
+          localStorage.setItem(SAVE_KEY, JSON.stringify(elements))
+        }
+      } catch (err) {
+        console.warn('Failed to save elements:', err)
+      }
+    }
+
+    const initialElements = loadElements()
+    const props = {
+      theme: 'dark',
+      onChange: (elements) => saveElements(elements),
+    }
+    if (initialElements) props.initialData = { elements: initialElements }
+    
+    root.render(
+      React.createElement('div', { style: { height: '100vh' } },
+        React.createElement(Excalidraw, props)
+      )
+    );
+  </script>
+</body>
+</html>`
+}
+
+/**
+ * Starts the HTTP server and handles all routes.
+ * Serves:
+ * - HTML template at root
+ * - Vendor JavaScript files (React, ReactDOM, Excalidraw)
+ * - Custom fonts
+ * - Excalidraw assets
+ * 
+ * Handles port conflicts by automatically trying the next available port.
+ * Manages background/daemon mode and instance registration.
+ */
+function start() {
+  const server = http.createServer((req, res) => {
+    try {
+      if (req.url === '/' || req.url === '/index.html') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(htmlTemplate())
+        return
+      }
+
+      // Serve vendor JS (React, ReactDOM, Excalidraw UMD bundles)
+      const vendorFiles = {
+        '/vendor/react.production.min.js': path.join(paths.react, 'umd/react.production.min.js'),
+        '/vendor/react-dom.production.min.js': path.join(paths.reactDom, 'umd/react-dom.production.min.js'),
+        '/vendor/excalidraw.production.min.js': path.join(paths.excalidraw, 'dist/excalidraw.production.min.js')
+      }
+      
+      if (vendorFiles[req.url]) {
+        const file = vendorFiles[req.url]
+        if (!fs.existsSync(file)) {
+          log.error(`Vendor file not found: ${file}`)
+          res.writeHead(404)
+          res.end('Vendor file not found')
+          return
+        }
+        
+        res.writeHead(200, { 'content-type': 'application/javascript' })
+        const stream = fs.createReadStream(file)
+        stream.on('error', (err) => {
+          log.error(`Error serving vendor file ${req.url}: ${err.message}`)
+          if (!res.headersSent) {
+            res.writeHead(500)
+            res.end('Error serving vendor file')
+          }
+        })
+        stream.pipe(res)
+        return
+      }
+
+      // Serve custom fonts
+      if (req.url && req.url.startsWith('/fonts/')) {
+        try {
+          const fontName = sanitizePath(req.url.replace('/fonts/', ''))
+          const fontPath = path.join(FONTS_DIR, fontName)
+        if (fs.existsSync(fontPath) && fs.statSync(fontPath).isFile()) {
+          const ext = path.extname(fontPath).toLowerCase()
+          const type = (
+            ext === '.woff' ? 'font/woff' :
+            ext === '.woff2' ? 'font/woff2' :
+            ext === '.ttf' ? 'font/ttf' :
+            'application/octet-stream'
+          )
+          res.writeHead(200, { 'content-type': type })
+          const stream = fs.createReadStream(fontPath)
+          stream.on('error', (err) => {
+            log.warn(`Error serving font ${fontName}: ${err.message}`)
+            if (!res.headersSent) {
+              res.writeHead(500)
+              res.end('Error serving font')
+            }
+          })
+          stream.pipe(res)
+          return
+        } else {
+          res.writeHead(404)
+          res.end('Font not found')
+          return
+        }
+        } catch (err) {
+          log.warn(`Invalid font request: ${req.url}`)
+          res.writeHead(400)
+          res.end('Invalid request')
+          return
+        }
+      }
+
+      // Serve Excalidraw assets (fonts, vendor js, locales)
+      if (req.url && req.url.startsWith('/excalidraw-assets/')) {
+        try {
+          const rel = sanitizePath(req.url.replace('/excalidraw-assets/', ''))
+          const filePath = path.join(assetsDir, rel)
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const ext = path.extname(filePath).toLowerCase()
+          const type = (
+            ext === '.js' ? 'application/javascript' :
+            ext === '.woff' ? 'font/woff' :
+            ext === '.woff2' ? 'font/woff2' :
+            ext === '.json' ? 'application/json' :
+            'application/octet-stream'
+          )
+          res.writeHead(200, { 'content-type': type })
+          const stream = fs.createReadStream(filePath)
+          stream.on('error', (err) => {
+            log.warn(`Error serving asset ${rel}: ${err.message}`)
+            if (!res.headersSent) {
+              res.writeHead(500)
+              res.end('Error serving asset')
+            }
+          })
+          stream.pipe(res)
+          return
+        } else {
+          res.writeHead(404)
+          res.end('Not found')
+          return
+        }
+        } catch (err) {
+          log.warn(`Invalid asset request: ${req.url}`)
+          res.writeHead(400)
+          res.end('Invalid request')
+          return
+        }
+      }
+
+      res.writeHead(404)
+      res.end('Not found')
+    } catch (err) {
+      res.writeHead(500)
+      res.end('Server error')
+      console.error(err)
+    }
+  })
+
+  let currentPort = PORT
+  
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      currentPort++
+      if (verbose) console.log('Port ' + PORT + ' is in use, trying ' + currentPort + '...')
+      server.listen(currentPort, HOST)
+    } else {
+      console.error('Server error:', err.message)
+      process.exit(1)
+    }
+  })
+
+  server.listen(currentPort, HOST, () => {
+    const url = `http://${HOST}:${currentPort}/`
+    
+    // Daemonize BEFORE registering (so child registers with correct PID)
+    if (background && !child) {
+      try {
+        const node = process.execPath
+        const args = [__filename, '-p', String(currentPort), '--child']
+        if (instanceName) args.push('--name', instanceName)
+        const daemon = spawn(node, args, { detached: true, stdio: 'ignore' })
+        console.log('Started in background (PID ' + daemon.pid + ') at ' + url)
+        console.log('To stop: kill ' + daemon.pid)
+        daemon.unref()
+        process.exit(0)
+      } catch (err) {
+        console.error('Failed to daemonize:', err.message)
+        process.exit(1)
+      }
+    }
+    
+    // Register instance (child will have correct PID)
+    registerInstance(currentPort, instanceName)
+    
+    // Graceful shutdown handling
+    let isShuttingDown = false
+    
+    const gracefulShutdown = (signal) => {
+      if (isShuttingDown) return
+      isShuttingDown = true
+      
+      log.info(`Received ${signal}, shutting down gracefully...`)
+      
+      // Close server to stop accepting new connections
+      server.close((err) => {
+        if (err) {
+          log.error(`Error closing server: ${err.message}`)
+        } else {
+          log.debug('Server closed', verbose)
+        }
+        
+        // Clear instance PID and exit
+        clearInstancePid(currentPort)
+        log.info('Shutdown complete')
+        process.exit(0)
+      })
+      
+      // Force exit after timeout
+      setTimeout(() => {
+        log.warn('Force exit after timeout')
+        clearInstancePid(currentPort)
+        process.exit(1)
+      }, 3000)
+    }
+    
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+    process.on('exit', () => clearInstancePid(currentPort))
+    
+    log.info(`Excalidraw server started at ${url}`)
+    log.debug(`Process PID: ${process.pid}`, verbose)
+  })
+}
+
+/**
+ * Opens a URL in the default browser.
+ * Uses platform-specific commands:
+ * - macOS: 'open'
+ * - Windows: 'cmd /c start'
+ * - Linux/Unix: 'xdg-open'
+ * 
+ * @param {string} url - URL to open
+ */
+function openBrowser(url) {
+  const platform = os.platform()
+  let cmd, args
+  if (platform === 'darwin') { cmd = 'open'; args = [url] }
+  else if (platform === 'win32') { cmd = 'cmd'; args = ['/c', 'start', '""', url] }
+  else { cmd = 'xdg-open'; args = [url] }
+
+  const child = spawn(cmd, args, { stdio: 'ignore', detached: true })
+  child.on('error', () => { /* ignore */ })
+  child.unref()
+}
+
+// ============================================================================
+// GLOBAL ERROR HANDLERS
+// ============================================================================
+process.on('uncaughtException', (err) => {
+  log.error(`Uncaught Exception: ${err.message}`)
+  log.debug(err.stack, verbose)
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (reason, promise) => {
+  log.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`)
+  process.exit(1)
+})
+
+if (config && !config.__handled) start()
